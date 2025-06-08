@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'screens/onboarding_screen.dart';
 import 'screens/auth_page.dart';
-import 'screens/home_screen.dart'; // Import this at top
+import 'screens/home_screen.dart';
 
 const primaryColor = Color(0xFF6A4F9A);
 const secondaryColor = Color(0xFF9B59B6);
@@ -29,13 +30,14 @@ class LaptopHarborApp extends StatelessWidget {
       theme: ThemeData(
         fontFamily: 'Roboto',
         primaryColor: primaryColor,
-        scaffoldBackgroundColor: backgroundColor,
+        scaffoldBackgroundColor: const Color(0xFFF8F9FA),
+        textTheme: GoogleFonts.poppinsTextTheme(),
         colorScheme: ColorScheme.fromSwatch(primarySwatch: Colors.deepPurple)
             .copyWith(secondary: secondaryColor),
         elevatedButtonTheme: ElevatedButtonThemeData(
           style: ElevatedButton.styleFrom(
             backgroundColor: buttonColor,
-            foregroundColor: Colors.white, // Text color white kar diya
+            foregroundColor: Colors.white,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
             ),
@@ -72,8 +74,7 @@ class LaptopHarborApp extends StatelessWidget {
       routes: {
         '/': (context) => const OnboardingScreen(),
         '/login': (context) => const AuthPage(),
-        '/home': (context) => HomeScreen(),
-        // Add this line
+        '/home': (context) => const HomeScreen(),
       },
     );
   }
