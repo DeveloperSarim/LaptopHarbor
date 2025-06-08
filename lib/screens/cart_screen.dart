@@ -4,45 +4,20 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter_spinkit/flutter_spinkit.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-// Enhanced Cart Screen
-class EnhancedCartScreen extends StatefulWidget {
-  const EnhancedCartScreen({super.key});
+class CartScreen extends StatefulWidget {
+  const CartScreen({super.key});
 
   @override
-  State<EnhancedCartScreen> createState() => _EnhancedCartScreenState();
+  State<CartScreen> createState() => _CartScreenState();
 }
 
-class _EnhancedCartScreenState extends State<EnhancedCartScreen>
-    with TickerProviderStateMixin {
+class _CartScreenState extends State<CartScreen> with TickerProviderStateMixin {
   late AnimationController _slideController;
   late Animation<Offset> _slideAnimation;
 
-  List<Map<String, dynamic>> cartItems = [
-    {
-      'id': 1,
-      'name': 'Dell XPS 13 Plus',
-      'brand': 'Dell',
-      'price': 199999,
-      'originalPrice': 249999,
-      'image':
-          'https://images.unsplash.com/photo-1496181133206-80ce9b88a853?w=400',
-      'quantity': 1,
-      'specs': ['Intel i7', '16GB RAM', '512GB SSD'],
-      'discount': 20,
-    },
-    {
-      'id': 2,
-      'name': 'ASUS ROG Zephyrus G15',
-      'brand': 'ASUS',
-      'price': 179999,
-      'originalPrice': 199999,
-      'image':
-          'https://images.unsplash.com/photo-1593642702821-c8da6771f0c6?w=400',
-      'quantity': 1,
-      'specs': ['AMD Ryzen 9', '32GB RAM', 'RTX 4070'],
-      'discount': 10,
-    },
-  ];
+  List<Map<String, dynamic>> cartItems = [];
+  bool isLoading = true;
+  bool isPlacingOrder = false;
 
   @override
   void initState() {
@@ -59,12 +34,68 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
       curve: Curves.easeInOut,
     ));
     _slideController.forward();
+    _loadCartItems();
   }
 
-  @override
-  void dispose() {
-    _slideController.dispose();
-    super.dispose();
+  Future<void> _loadCartItems() async {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) {
+      setState(() {
+        isLoading = false;
+      });
+      return;
+    }
+
+    try {
+      final response = await Supabase.instance.client.from('cart').select('''
+            *,
+            products!inner(
+              *,
+              brands!inner(name),
+              product_images!inner(image_url, is_primary)
+            )
+          ''').eq('user_id', user.id);
+
+      setState(() {
+        cartItems = response.map((item) {
+          final product = item['products'];
+          final images = product['product_images'] as List;
+          final primaryImage = images.firstWhere(
+            (img) => img['is_primary'] == true,
+            orElse: () => images.isNotEmpty ? images.first : null,
+          );
+
+          return {
+            'id': item['id'],
+            'product_id': product['id'],
+            'name': product['name'],
+            'brand': product['brands']['name'],
+            'price': product['price'],
+            'originalPrice': product['original_price'],
+            'image': primaryImage?['image_url'] ??
+                'https://images.unsplash.com/photo-1496181133206-80ce9b88a853?w=400',
+            'quantity': item['quantity'],
+            'specs': [
+              product['processor'] ?? 'Intel Core',
+              product['ram'] ?? '16GB RAM',
+              product['storage'] ?? '512GB SSD'
+            ].where((spec) => spec.isNotEmpty).toList(),
+            'discount': product['original_price'] != null
+                ? (((product['original_price'] - product['price']) /
+                            product['original_price']) *
+                        100)
+                    .round()
+                : 0,
+          };
+        }).toList();
+        isLoading = false;
+      });
+    } catch (e) {
+      print('Error loading cart items: $e');
+      setState(() {
+        isLoading = false;
+      });
+    }
   }
 
   double get subtotal {
@@ -76,76 +107,124 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
     return cartItems.fold(
         0,
         (sum, item) =>
-            sum + ((item['originalPrice'] - item['price']) * item['quantity']));
+            sum +
+            ((item['originalPrice'] ?? item['price']) - item['price']) *
+                item['quantity']);
   }
 
   double get tax => subtotal * 0.18; // 18% GST
   double get shipping => subtotal > 50000 ? 0 : 500;
   double get total => subtotal + tax + shipping;
 
-  void _updateQuantity(int id, int newQuantity) {
-    setState(() {
+  void _updateQuantity(String cartId, String productId, int newQuantity) async {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return;
+
+    try {
       if (newQuantity <= 0) {
-        cartItems.removeWhere((item) => item['id'] == id);
+        await Supabase.instance.client.from('cart').delete().eq('id', cartId);
+
+        setState(() {
+          cartItems.removeWhere((item) => item['id'] == cartId);
+        });
       } else {
-        final index = cartItems.indexWhere((item) => item['id'] == id);
-        if (index != -1) {
-          cartItems[index]['quantity'] = newQuantity;
-        }
+        await Supabase.instance.client
+            .from('cart')
+            .update({'quantity': newQuantity}).eq('id', cartId);
+
+        setState(() {
+          final index = cartItems.indexWhere((item) => item['id'] == cartId);
+          if (index != -1) {
+            cartItems[index]['quantity'] = newQuantity;
+          }
+        });
       }
-    });
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error updating cart', style: GoogleFonts.poppins()),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _clearCart() async {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return;
+
+    try {
+      await Supabase.instance.client
+          .from('cart')
+          .delete()
+          .eq('user_id', user.id);
+
+      setState(() {
+        cartItems.clear();
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content:
+              Text('Cart cleared successfully', style: GoogleFonts.poppins()),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error clearing cart', style: GoogleFonts.poppins()),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _slideController.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              Color(0xFF667eea),
-              Color(0xFF764ba2),
-              Color(0xFFF093FB),
-            ],
-          ),
+    if (isLoading) {
+      return const Center(
+        child: SpinKitFadingCircle(
+          color: Color(0xFF667eea),
+          size: 50,
         ),
-        child: SafeArea(
-          child: SlideTransition(
-            position: _slideAnimation,
-            child: Column(
-              children: [
-                _buildCartAppBar(),
-                Expanded(
-                  child: cartItems.isEmpty
-                      ? _buildEmptyCart()
-                      : _buildCartContent(),
-                ),
-              ],
-            ),
+      );
+    }
+
+    return SlideTransition(
+      position: _slideAnimation,
+      child: Column(
+        children: [
+          _buildCartHeader(),
+          Expanded(
+            child: cartItems.isEmpty ? _buildEmptyCart() : _buildCartContent(),
           ),
-        ),
+        ],
       ),
     );
   }
 
-  Widget _buildCartAppBar() {
+  Widget _buildCartHeader() {
     return Container(
       padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 5,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
       child: Row(
         children: [
-          Container(
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.2),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: IconButton(
-              icon: const Icon(Icons.arrow_back, color: Colors.white),
-              onPressed: () => Navigator.pop(context),
-            ),
-          ),
-          const SizedBox(width: 16),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -153,7 +232,7 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
                 Text(
                   'Shopping Cart',
                   style: GoogleFonts.poppins(
-                    color: Colors.white,
+                    color: const Color(0xFF2D3748),
                     fontSize: 24,
                     fontWeight: FontWeight.bold,
                   ),
@@ -161,27 +240,51 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
                 Text(
                   '${cartItems.length} items in cart',
                   style: GoogleFonts.poppins(
-                    color: Colors.white.withOpacity(0.8),
+                    color: Colors.grey[600],
                     fontSize: 14,
                   ),
                 ),
               ],
             ),
           ),
-          Container(
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.2),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: IconButton(
-              icon: const Icon(Icons.delete_outline, color: Colors.white),
+          if (cartItems.isNotEmpty)
+            TextButton(
               onPressed: () {
-                setState(() {
-                  cartItems.clear();
-                });
+                showDialog(
+                  context: context,
+                  builder: (context) => AlertDialog(
+                    title: Text('Clear Cart', style: GoogleFonts.poppins()),
+                    content: Text(
+                      'Are you sure you want to remove all items from your cart?',
+                      style: GoogleFonts.poppins(),
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: const Text('Cancel'),
+                      ),
+                      ElevatedButton(
+                        onPressed: () {
+                          Navigator.pop(context);
+                          _clearCart();
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.red,
+                        ),
+                        child: const Text('Clear Cart'),
+                      ),
+                    ],
+                  ),
+                );
               },
+              child: Text(
+                'Clear Cart',
+                style: GoogleFonts.poppins(
+                  color: Colors.red,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ),
-          ),
         ],
       ),
     );
@@ -196,41 +299,40 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
             width: 120,
             height: 120,
             decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.1),
+              color: Colors.grey[200],
               borderRadius: BorderRadius.circular(60),
             ),
             child: const Icon(
               Icons.shopping_cart_outlined,
               size: 60,
-              color: Colors.white,
+              color: Colors.grey,
             ),
           ),
           const SizedBox(height: 24),
           Text(
             'Your cart is empty',
             style: GoogleFonts.poppins(
-              color: Colors.white,
               fontSize: 24,
               fontWeight: FontWeight.bold,
+              color: const Color(0xFF2D3748),
             ),
           ),
           const SizedBox(height: 8),
           Text(
             'Add some amazing laptops to get started!',
             style: GoogleFonts.poppins(
-              color: Colors.white.withOpacity(0.8),
               fontSize: 16,
+              color: Colors.grey[600],
             ),
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: 32),
           ElevatedButton(
             onPressed: () {
-              // Navigate back to home
+              // You can navigate back to home tab
             },
             style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.white,
-              foregroundColor: const Color(0xFF667eea),
+              backgroundColor: const Color(0xFF667eea),
               padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
@@ -239,6 +341,7 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
             child: Text(
               'Start Shopping',
               style: GoogleFonts.poppins(
+                color: Colors.white,
                 fontWeight: FontWeight.w600,
                 fontSize: 16,
               ),
@@ -260,9 +363,9 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
               borderRadius: BorderRadius.circular(20),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withOpacity(0.1),
-                  blurRadius: 20,
-                  offset: const Offset(0, 5),
+                  color: Colors.black.withOpacity(0.05),
+                  blurRadius: 10,
+                  offset: const Offset(0, 2),
                 ),
               ],
             ),
@@ -285,7 +388,7 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
                         const Icon(Icons.savings, color: Colors.white),
                         const SizedBox(width: 8),
                         Text(
-                          'You\'re saving ₹${totalSavings.toStringAsFixed(0)} on this order!',
+                          'You\'re saving PKR ${totalSavings.toStringAsFixed(0)} on this order!',
                           style: GoogleFonts.poppins(
                             color: Colors.white,
                             fontWeight: FontWeight.w600,
@@ -354,31 +457,32 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
                 overflow: TextOverflow.ellipsis,
               ),
               const SizedBox(height: 4),
-              Wrap(
-                spacing: 8,
-                children: item['specs']
-                    .map<Widget>((spec) => Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: Colors.grey[100],
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            spec,
-                            style: GoogleFonts.poppins(
-                              fontSize: 10,
-                              color: Colors.grey[600],
+              if (item['specs'] != null && item['specs'].isNotEmpty)
+                Wrap(
+                  spacing: 8,
+                  children: item['specs']
+                      .map<Widget>((spec) => Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.grey[100],
+                              borderRadius: BorderRadius.circular(8),
                             ),
-                          ),
-                        ))
-                    .toList(),
-              ),
+                            child: Text(
+                              spec,
+                              style: GoogleFonts.poppins(
+                                fontSize: 10,
+                                color: Colors.grey[600],
+                              ),
+                            ),
+                          ))
+                      .toList(),
+                ),
               const SizedBox(height: 8),
               Row(
                 children: [
                   Text(
-                    '₹${item['price']}',
+                    'PKR ${item['price'].toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => '${m[1]},')}',
                     style: GoogleFonts.poppins(
                       fontSize: 18,
                       fontWeight: FontWeight.bold,
@@ -386,31 +490,34 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
                     ),
                   ),
                   const SizedBox(width: 8),
-                  Text(
-                    '₹${item['originalPrice']}',
-                    style: GoogleFonts.poppins(
-                      fontSize: 14,
-                      color: Colors.grey[500],
-                      decoration: TextDecoration.lineThrough,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: Colors.green,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Text(
-                      '${item['discount']}% OFF',
+                  if (item['originalPrice'] != null &&
+                      item['originalPrice'] > item['price'])
+                    Text(
+                      'PKR ${item['originalPrice'].toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => '${m[1]},')}',
                       style: GoogleFonts.poppins(
-                        fontSize: 10,
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                        color: Colors.grey[500],
+                        decoration: TextDecoration.lineThrough,
                       ),
                     ),
-                  ),
+                  const SizedBox(width: 8),
+                  if (item['discount'] > 0)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.green,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        '${item['discount']}% OFF',
+                        style: GoogleFonts.poppins(
+                          fontSize: 10,
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ],
@@ -427,8 +534,8 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   GestureDetector(
-                    onTap: () =>
-                        _updateQuantity(item['id'], item['quantity'] - 1),
+                    onTap: () => _updateQuantity(
+                        item['id'], item['product_id'], item['quantity'] - 1),
                     child: Container(
                       padding: const EdgeInsets.all(8),
                       child: const Icon(Icons.remove, size: 16),
@@ -443,8 +550,8 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
                     ),
                   ),
                   GestureDetector(
-                    onTap: () =>
-                        _updateQuantity(item['id'], item['quantity'] + 1),
+                    onTap: () => _updateQuantity(
+                        item['id'], item['product_id'], item['quantity'] + 1),
                     child: Container(
                       padding: const EdgeInsets.all(8),
                       child: const Icon(Icons.add, size: 16),
@@ -455,7 +562,7 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
             ),
             const SizedBox(height: 8),
             GestureDetector(
-              onTap: () => _updateQuantity(item['id'], 0),
+              onTap: () => _updateQuantity(item['id'], item['product_id'], 0),
               child: Container(
                 padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
@@ -480,9 +587,9 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
         borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 20,
-            offset: const Offset(0, 5),
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
           ),
         ],
       ),
@@ -498,24 +605,27 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
             ),
           ),
           const SizedBox(height: 16),
-          _buildSummaryRow('Subtotal', '₹${subtotal.toStringAsFixed(0)}'),
+          _buildSummaryRow('Subtotal', 'PKR ${subtotal.toStringAsFixed(0)}'),
           if (totalSavings > 0)
-            _buildSummaryRow('Savings', '-₹${totalSavings.toStringAsFixed(0)}',
+            _buildSummaryRow(
+                'Savings', '-PKR ${totalSavings.toStringAsFixed(0)}',
                 isDiscount: true),
-          _buildSummaryRow('GST (18%)', '₹${tax.toStringAsFixed(0)}'),
+          _buildSummaryRow('GST (18%)', 'PKR ${tax.toStringAsFixed(0)}'),
           _buildSummaryRow('Shipping',
-              shipping == 0 ? 'FREE' : '₹${shipping.toStringAsFixed(0)}',
+              shipping == 0 ? 'FREE' : 'PKR ${shipping.toStringAsFixed(0)}',
               isShipping: true),
           const Divider(height: 24),
-          _buildSummaryRow('Total', '₹${total.toStringAsFixed(0)}',
+          _buildSummaryRow('Total', 'PKR ${total.toStringAsFixed(0)}',
               isTotal: true),
           const SizedBox(height: 20),
           SizedBox(
             width: double.infinity,
             child: ElevatedButton(
-              onPressed: () {
-                _showCheckoutDialog();
-              },
+              onPressed: isPlacingOrder
+                  ? null
+                  : () {
+                      _showCheckoutDialog();
+                    },
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF667eea),
                 padding: const EdgeInsets.symmetric(vertical: 16),
@@ -523,14 +633,23 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
                   borderRadius: BorderRadius.circular(12),
                 ),
               ),
-              child: Text(
-                'Proceed to Checkout',
-                style: GoogleFonts.poppins(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
+              child: isPlacingOrder
+                  ? const SizedBox(
+                      height: 20,
+                      width: 20,
+                      child: CircularProgressIndicator(
+                        color: Colors.white,
+                        strokeWidth: 2,
+                      ),
+                    )
+                  : Text(
+                      'Proceed to Checkout',
+                      style: GoogleFonts.poppins(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
             ),
           ),
         ],
@@ -578,10 +697,34 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Text('Checkout', style: GoogleFonts.poppins()),
-        content: Text(
-          'Proceed to payment gateway for ₹${total.toStringAsFixed(0)}?',
-          style: GoogleFonts.poppins(),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Order Summary:',
+              style: GoogleFonts.poppins(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '${cartItems.length} items',
+              style: GoogleFonts.poppins(),
+            ),
+            Text(
+              'Total: PKR ${total.toStringAsFixed(0)}',
+              style: GoogleFonts.poppins(
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Proceed to payment gateway?',
+              style: GoogleFonts.poppins(),
+            ),
+          ],
         ),
         actions: [
           TextButton(
@@ -591,414 +734,92 @@ class _EnhancedCartScreenState extends State<EnhancedCartScreen>
           ElevatedButton(
             onPressed: () {
               Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text('Order placed successfully!',
-                      style: GoogleFonts.poppins()),
-                  backgroundColor: Colors.green,
-                ),
-              );
-              setState(() {
-                cartItems.clear();
-              });
+              _placeOrder();
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF667eea),
             ),
-            child: const Text('Pay Now', style: TextStyle(color: Colors.white)),
+            child: const Text('Place Order',
+                style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
     );
   }
-}
 
-// Enhanced Profile Screen
-class EnhancedProfileScreen extends StatefulWidget {
-  const EnhancedProfileScreen({super.key});
-
-  @override
-  State<EnhancedProfileScreen> createState() => _EnhancedProfileScreenState();
-}
-
-class _EnhancedProfileScreenState extends State<EnhancedProfileScreen>
-    with TickerProviderStateMixin {
-  late AnimationController _slideController;
-  late Animation<Offset> _slideAnimation;
-
-  String userName = "John Doe";
-  String userEmail = "john.doe@example.com";
-  String userPhone = "+91 98765 43210";
-  String userLocation = "Mumbai, India";
-
-  @override
-  void initState() {
-    super.initState();
-    _slideController = AnimationController(
-      duration: const Duration(milliseconds: 600),
-      vsync: this,
-    );
-    _slideAnimation = Tween<Offset>(
-      begin: const Offset(0, 0.3),
-      end: Offset.zero,
-    ).animate(CurvedAnimation(
-      parent: _slideController,
-      curve: Curves.easeInOut,
-    ));
-    _slideController.forward();
-    _loadUserData();
-  }
-
-  void _loadUserData() {
+  Future<void> _placeOrder() async {
     final user = Supabase.instance.client.auth.currentUser;
-    if (user != null) {
+    if (user == null) return;
+
+    setState(() {
+      isPlacingOrder = true;
+    });
+
+    try {
+      // Create order
+      final orderResponse = await Supabase.instance.client
+          .from('orders')
+          .insert({
+            'user_id': user.id,
+            'subtotal': subtotal,
+            'tax_amount': tax,
+            'shipping_amount': shipping,
+            'total_amount': total,
+            'status': 'pending',
+            'payment_status': 'pending',
+          })
+          .select()
+          .single();
+
+      // Create order items
+      final orderItems = cartItems
+          .map((item) => {
+                'order_id': orderResponse['id'],
+                'product_id': item['product_id'],
+                'product_name': item['name'],
+                'unit_price': item['price'],
+                'quantity': item['quantity'],
+                'total_price': item['price'] * item['quantity'],
+              })
+          .toList();
+
+      await Supabase.instance.client.from('order_items').insert(orderItems);
+
+      // Clear cart
+      await Supabase.instance.client
+          .from('cart')
+          .delete()
+          .eq('user_id', user.id);
+
       setState(() {
-        userEmail = user.email ?? userEmail;
-        userName = user.email?.split('@')[0] ?? userName;
+        cartItems.clear();
+        isPlacingOrder = false;
       });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Order placed successfully! Order #${orderResponse['order_number']}',
+            style: GoogleFonts.poppins(),
+          ),
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+
+      // You can navigate to order confirmation screen here
+    } catch (e) {
+      setState(() {
+        isPlacingOrder = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error placing order: ${e.toString()}',
+              style: GoogleFonts.poppins()),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
-  }
-
-  @override
-  void dispose() {
-    _slideController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              Color(0xFF667eea),
-              Color(0xFF764ba2),
-              Color(0xFFF093FB),
-            ],
-          ),
-        ),
-        child: SafeArea(
-          child: SlideTransition(
-            position: _slideAnimation,
-            child: Column(
-              children: [
-                _buildProfileHeader(),
-                Expanded(
-                  child: _buildProfileContent(),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildProfileHeader() {
-    return Container(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              Container(
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: IconButton(
-                  icon: const Icon(Icons.settings, color: Colors.white),
-                  onPressed: () {},
-                ),
-              ),
-              const Spacer(),
-              Text(
-                'Profile',
-                style: GoogleFonts.poppins(
-                  color: Colors.white,
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const Spacer(),
-              Container(
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: IconButton(
-                  icon: const Icon(Icons.edit, color: Colors.white),
-                  onPressed: () {},
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 24),
-          Container(
-            width: 100,
-            height: 100,
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(50),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.2),
-                  blurRadius: 20,
-                  offset: const Offset(0, 5),
-                ),
-              ],
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(50),
-              child: Icon(
-                Icons.person,
-                size: 50,
-                color: Colors.grey[400],
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            userName,
-            style: GoogleFonts.poppins(
-              color: Colors.white,
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          Text(
-            userEmail,
-            style: GoogleFonts.poppins(
-              color: Colors.white.withOpacity(0.8),
-              fontSize: 14,
-            ),
-          ),
-          const SizedBox(height: 16),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              _buildStatCard('Orders', '12'),
-              _buildStatCard('Wishlist', '8'),
-              _buildStatCard('Reviews', '25'),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStatCard(String label, String value) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.2),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white.withOpacity(0.3)),
-      ),
-      child: Column(
-        children: [
-          Text(
-            value,
-            style: GoogleFonts.poppins(
-              color: Colors.white,
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          Text(
-            label,
-            style: GoogleFonts.poppins(
-              color: Colors.white.withOpacity(0.8),
-              fontSize: 12,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildProfileContent() {
-    return Container(
-      margin: const EdgeInsets.only(top: 20),
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
-      ),
-      child: ListView(
-        padding: const EdgeInsets.all(24),
-        children: [
-          _buildSectionTitle('Account'),
-          _buildProfileOption(
-            Icons.person_outline,
-            'Personal Information',
-            'Update your personal details',
-            () {},
-          ),
-          _buildProfileOption(
-            Icons.location_on_outlined,
-            'Addresses',
-            'Manage delivery addresses',
-            () {},
-          ),
-          _buildProfileOption(
-            Icons.payment_outlined,
-            'Payment Methods',
-            'Manage cards and payment options',
-            () {},
-          ),
-          const SizedBox(height: 24),
-          _buildSectionTitle('Orders & Purchases'),
-          _buildProfileOption(
-            Icons.shopping_bag_outlined,
-            'My Orders',
-            'Track and manage your orders',
-            () {},
-          ),
-          _buildProfileOption(
-            Icons.favorite_border,
-            'Wishlist',
-            'View your favorite items',
-            () {},
-          ),
-          _buildProfileOption(
-            Icons.star_border,
-            'Reviews & Ratings',
-            'Your reviews and ratings',
-            () {},
-          ),
-          const SizedBox(height: 24),
-          _buildSectionTitle('Support & Legal'),
-          _buildProfileOption(
-            Icons.help_outline,
-            'Help & Support',
-            'Get help and contact support',
-            () {},
-          ),
-          _buildProfileOption(
-            Icons.privacy_tip_outlined,
-            'Privacy Policy',
-            'Read our privacy policy',
-            () {},
-          ),
-          _buildProfileOption(
-            Icons.description_outlined,
-            'Terms & Conditions',
-            'Read terms and conditions',
-            () {},
-          ),
-          const SizedBox(height: 24),
-          _buildProfileOption(
-            Icons.logout,
-            'Sign Out',
-            'Sign out of your account',
-            () => _showSignOutDialog(),
-            isDestructive: true,
-          ),
-          const SizedBox(height: 40),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildSectionTitle(String title) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Text(
-        title,
-        style: GoogleFonts.poppins(
-          fontSize: 16,
-          fontWeight: FontWeight.bold,
-          color: const Color(0xFF2D3748),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildProfileOption(
-    IconData icon,
-    String title,
-    String subtitle,
-    VoidCallback onTap, {
-    bool isDestructive = false,
-  }) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        color: Colors.grey[50],
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey.withOpacity(0.2)),
-      ),
-      child: ListTile(
-        onTap: onTap,
-        leading: Container(
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: isDestructive
-                ? Colors.red.withOpacity(0.1)
-                : const Color(0xFF667eea).withOpacity(0.1),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Icon(
-            icon,
-            color: isDestructive ? Colors.red[600] : const Color(0xFF667eea),
-            size: 20,
-          ),
-        ),
-        title: Text(
-          title,
-          style: GoogleFonts.poppins(
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
-            color: isDestructive ? Colors.red[600] : const Color(0xFF2D3748),
-          ),
-        ),
-        subtitle: Text(
-          subtitle,
-          style: GoogleFonts.poppins(
-            fontSize: 12,
-            color: Colors.grey[600],
-          ),
-        ),
-        trailing: Icon(
-          Icons.arrow_forward_ios,
-          color: Colors.grey[400],
-          size: 16,
-        ),
-      ),
-    );
-  }
-
-  void _showSignOutDialog() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Sign Out', style: GoogleFonts.poppins()),
-        content: Text(
-          'Are you sure you want to sign out?',
-          style: GoogleFonts.poppins(),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              await Supabase.instance.client.auth.signOut();
-              Navigator.pop(context);
-              // Navigate to login
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red[600],
-            ),
-            child:
-                const Text('Sign Out', style: TextStyle(color: Colors.white)),
-          ),
-        ],
-      ),
-    );
   }
 }
