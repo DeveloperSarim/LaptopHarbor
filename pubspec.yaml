@@ -39,3 +39,8 @@ flutter:
   #       - asset: fonts/TrajanPro.ttf
   #       - asset: fonts/TrajanPro_Bold.ttf
   #         weight: 700
+
+flutter_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/logo_laptop.png"  # Your icon file path
